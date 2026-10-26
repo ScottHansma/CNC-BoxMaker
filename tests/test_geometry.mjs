@@ -896,3 +896,140 @@ test("every top construction remains inside its assembled dimensions", () => {
 test("invalid box dimensions are rejected", () => {
   assert.throws(() => buildLayout({ ...DEFAULT, width: 30 }), /width/);
 });
+
+const SEPARATE_CUTTER = {
+  ...DEFAULT,
+  cutter_diameter: 6.35,
+  separate_dogbone_cutter: true,
+  dogbone_cutter_diameter: 3.175,
+};
+
+const pointInPolygon = ([px, py], polygon) => {
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index, index += 1) {
+    const [x0, y0] = polygon[index];
+    const [x1, y1] = polygon[previous];
+    if ((y0 > py) !== (y1 > py) && px < (x1 - x0) * (py - y0) / (y1 - y0) + x0) inside = !inside;
+  }
+  return inside;
+};
+
+test("separate dogbone cutter keeps square main profiles and adds relief regions", () => {
+  const layout = buildLayout(SEPARATE_CUTTER);
+  assert.equal(layout.spec.separate_dogbone_cutter, true);
+  assert.equal(layout.manufacturing.separate_dogbone_cutter, true);
+  assert.equal(layout.manufacturing.dogbone_diameter, 3.175);
+  const cutPaths = layout.entities.filter((entity) => entity.layer === "CUT_OUTSIDE");
+  assert.ok(cutPaths.every((entity) => entity.bulges.every((bulge) => bulge === 0)));
+  const reliefs = layout.entities.filter((entity) => entity.layer === "CUT_DOGBONE");
+  const dogbones = layout.parts.flatMap((part) => part.operations.filter((operation) => operation.type === "dogbone"));
+  assert.ok(dogbones.length);
+  assert.equal(reliefs.length, dogbones.length);
+  assert.ok(dogbones.every((operation) => operation.radius === 3.175 / 2));
+  assert.ok(reliefs.every((entity) => entity.closed && entity.bulges.length === entity.points.length));
+  assert.ok(reliefs.every((entity) => entity.bulges.some((bulge) => Math.abs(bulge) > 0)));
+});
+
+test("separate dogbone reliefs clear the main cutter fillet without cutting into the part", () => {
+  const layout = buildLayout(SEPARATE_CUTTER);
+  const mainRadius = SEPARATE_CUTTER.cutter_diameter / 2;
+  const reliefs = layout.entities.filter((entity) => entity.layer === "CUT_DOGBONE");
+  for (const part of layout.parts.slice(0, 4)) {
+    const [ox, oy] = part.layout_origin;
+    const dogbones = part.operations.filter((operation) => operation.type === "dogbone");
+    const partRegions = reliefs
+      .map((entity) => entity.points.map(([px, py]) => [px - ox, py - oy]))
+      .filter((region) => dogbones.some((operation) => pointInPolygon([operation.cx, operation.cy], region)));
+    assert.equal(partRegions.length, dogbones.length);
+    for (const operation of dogbones) {
+      const region = partRegions.find((candidate) => pointInPolygon([operation.cx, operation.cy], candidate));
+      const bisector = [operation.cx - operation.corner[0], operation.cy - operation.corner[1]];
+      const bisectorLength = Math.hypot(...bisector);
+      const unit = bisector.map((value) => value / bisectorLength);
+      const edges = [
+        [(unit[0] - unit[1]) / Math.SQRT2, (unit[0] + unit[1]) / Math.SQRT2],
+        [(unit[0] + unit[1]) / Math.SQRT2, (unit[1] - unit[0]) / Math.SQRT2],
+      ];
+      const at = (a, b) => [
+        operation.corner[0] + edges[0][0] * a + edges[1][0] * b,
+        operation.corner[1] + edges[0][1] * a + edges[1][1] * b,
+      ];
+      const mainCenter = at(mainRadius, mainRadius);
+      // The odd grid offset keeps samples off the profile edges themselves.
+      for (let a = -mainRadius + 0.0137; a <= 2 * mainRadius; a += mainRadius / 20) {
+        for (let b = -mainRadius + 0.0137; b <= 2 * mainRadius; b += mainRadius / 20) {
+          const point = at(a, b);
+          const inMaterial = pointInPolygon(point, part.diagnostic_profile);
+          const inDogbone = Math.hypot(point[0] - operation.cx, point[1] - operation.cy) < operation.radius - 0.05;
+          const missedByMainCutter = a > 0.05 && b > 0.05 && a < mainRadius && b < mainRadius
+            && Math.hypot(point[0] - mainCenter[0], point[1] - mainCenter[1]) > mainRadius + 0.05;
+          const inRegion = pointInPolygon(point, region);
+          if (inDogbone || missedByMainCutter) assert.ok(inRegion, `uncleared point ${point}`);
+          if (inRegion && inMaterial) {
+            assert.ok(
+              Math.hypot(point[0] - operation.cx, point[1] - operation.cy) <= operation.radius + 0.05,
+              `relief cuts into the part at ${point}`,
+            );
+          }
+        }
+      }
+    }
+  }
+});
+
+test("separate dogbone cutter writes tool-named DXF layers and settings", () => {
+  const dxf = layoutToDxf(buildLayout(SEPARATE_CUTTER), "in");
+  assert.match(dxf, /2\nCUT_DOGBONE_0\.125IN\n/);
+  assert.match(dxf, /8\nCUT_DOGBONE_0\.125IN\n/);
+  assert.ok(dxf.includes("999\nseparate_dogbone_cutter=true"));
+  assert.ok(dxf.includes("999\ndogbone_cutter_diameter_mm=3.175"));
+  assert.ok(dxf.includes("999\ncutter_diameter_mm=6.35"));
+  const defaultDxf = layoutToDxf(buildLayout(DEFAULT));
+  assert.ok(defaultDxf.includes("999\nseparate_dogbone_cutter=false"));
+  assert.ok(!defaultDxf.includes("DOGBONE"));
+});
+
+test("separate dogbone cutter adds relief pockets to hidden-finger joinery", () => {
+  const layout = buildLayout({
+    ...SEPARATE_CUTTER,
+    wall_connection: "hidden_finger",
+    bottom_type: "hidden_finger_jointed",
+    top_type: "hidden_finger_jointed",
+  });
+  const layers = new Set(layout.entities.map((entity) => entity.layer));
+  for (const layer of [
+    "POCKET_HIDDEN_FINGERS_DOGBONE", "POCKET_HIDDEN_BOTTOM_DOGBONE", "POCKET_HIDDEN_TOP_DOGBONE",
+  ]) assert.ok(layers.has(layer), layer);
+  for (const layer of ["POCKET_HIDDEN_FINGERS", "POCKET_HIDDEN_BOTTOM", "POCKET_HIDDEN_TOP"]) {
+    assert.ok(layout.entities.filter((entity) => entity.layer === layer)
+      .every((entity) => entity.bulges.every((bulge) => bulge === 0)), layer);
+  }
+  const reliefOperations = layout.parts.flatMap((part) =>
+    part.operations.filter((operation) => operation.type === "hidden_finger_relief"));
+  assert.ok(reliefOperations.length);
+  assert.ok(reliefOperations.every((operation) => operation.radius === 3.175 / 2));
+  assert.equal(
+    layout.entities.filter((entity) => entity.layer.startsWith("POCKET_HIDDEN") && entity.layer.endsWith("_DOGBONE")).length,
+    reliefOperations.length,
+  );
+  const dxf = layoutToDxf(layout, "in");
+  assert.match(dxf, /8\nPOCKET_HIDDEN_FINGERS_0\.410IN_DOGBONE_0\.125IN\n/);
+});
+
+test("separate dogbone cutter is ignored when dogbones are off", () => {
+  const layout = buildLayout({ ...SEPARATE_CUTTER, use_dogbones: false });
+  assert.equal(layout.manufacturing.separate_dogbone_cutter, false);
+  assert.ok(!layout.entities.some((entity) => entity.layer.endsWith("_DOGBONE")));
+  assert.ok(!layoutToDxf(layout).includes("DOGBONE_"));
+});
+
+test("separate dogbone cutter validates both cutter sizes", () => {
+  assert.throws(
+    () => buildLayout({ ...SEPARATE_CUTTER, dogbone_cutter_diameter: 8 }),
+    /dogbone cutter diameter must not exceed the main cutter diameter/,
+  );
+  assert.throws(
+    () => buildLayout({ ...SEPARATE_CUTTER, cutter_diameter: 30 }),
+    /main cutter diameter is too large/,
+  );
+});

@@ -18,6 +18,7 @@ const DXF_SETTING_NAMES = [
   "top_slot_offset",
   "top_inset_depth",
   "cutter_diameter",
+  "dogbone_cutter_diameter",
 ];
 
 function trimFixed(value, places = 6) {
@@ -50,7 +51,15 @@ export function layoutToDxf(layout, units = "mm") {
   const hiddenBottomPocketLayer = `POCKET_HIDDEN_BOTTOM_${hiddenBottomPocketDepth.toFixed(3)}${units.toUpperCase()}`;
   const hiddenTopPocketDepth = layout.manufacturing.hidden_top_pocket_depth * scale;
   const hiddenTopPocketLayer = `POCKET_HIDDEN_TOP_${hiddenTopPocketDepth.toFixed(3)}${units.toUpperCase()}`;
+  const dogboneSuffix = `DOGBONE_${(layout.manufacturing.dogbone_diameter * scale).toFixed(3)}${units.toUpperCase()}`;
+  const dogboneLayers = layout.manufacturing.separate_dogbone_cutter ? {
+    CUT_DOGBONE: `CUT_${dogboneSuffix}`,
+    POCKET_HIDDEN_FINGERS_DOGBONE: `${hiddenPocketLayer}_${dogboneSuffix}`,
+    POCKET_HIDDEN_BOTTOM_DOGBONE: `${hiddenBottomPocketLayer}_${dogboneSuffix}`,
+    POCKET_HIDDEN_TOP_DOGBONE: `${hiddenTopPocketLayer}_${dogboneSuffix}`,
+  } : {};
   const outputLayer = (layer) => ({
+    ...dogboneLayers,
     POCKET_BOTTOM_SLOT: bottomPocketLayer,
     POCKET_BOTTOM_INSET: bottomInsetPocketLayer,
     POCKET_TOP_SLOT: topPocketLayer,
@@ -68,6 +77,7 @@ export function layoutToDxf(layout, units = "mm") {
     metadata.push(pair(999, `${name}_mm=${significant(storedSpec[name])}`));
   }
   metadata.push(pair(999, `use_dogbones=${storedSpec.use_dogbones !== false}`));
+  metadata.push(pair(999, `separate_dogbone_cutter=${storedSpec.separate_dogbone_cutter === true}`));
   metadata.push(pair(999, `bottom_type=${storedSpec.bottom_type ?? "captured"}`));
   metadata.push(pair(999, `top_type=${storedSpec.top_type ?? "none"}`));
   metadata.push(pair(999, `wall_connection=${storedSpec.wall_connection ?? "finger"}`));
@@ -83,9 +93,8 @@ export function layoutToDxf(layout, units = "mm") {
     pair(0, "LTYPE"), pair(100, "AcDbSymbolTableRecord"), pair(100, "AcDbLinetypeTableRecord"),
     pair(2, "DASHED"), pair(70, 0), pair(3, "Dashed __ __"), pair(72, 65), pair(73, 2),
     pair(40, 9 * scale), pair(49, 6 * scale), pair(74, 0), pair(49, -3 * scale), pair(74, 0),
-    pair(0, "ENDTAB"), pair(0, "TABLE"), pair(2, "LAYER"), pair(70, 10),
   ];
-  for (const [name, color, lineType] of [
+  const layers = [
     ["CUT_OUTSIDE", 7, "CONTINUOUS"],
     [bottomPocketLayer, 5, "CONTINUOUS"],
     [bottomInsetPocketLayer, 5, "CONTINUOUS"],
@@ -94,9 +103,12 @@ export function layoutToDxf(layout, units = "mm") {
     [hiddenPocketLayer, 4, "CONTINUOUS"],
     [hiddenBottomPocketLayer, 4, "CONTINUOUS"],
     [hiddenTopPocketLayer, 4, "CONTINUOUS"],
+    ...Object.values(dogboneLayers).map((name) => [name, 6, "CONTINUOUS"]),
     ["MITER_END", 3, "DASHED"],
     ["ANNOTATION", 8, "CONTINUOUS"],
-  ]) {
+  ];
+  chunks.push(pair(0, "ENDTAB"), pair(0, "TABLE"), pair(2, "LAYER"), pair(70, layers.length));
+  for (const [name, color, lineType] of layers) {
     chunks.push(
       pair(0, "LAYER"), pair(2, name), pair(70, 0), pair(62, color), pair(6, lineType),
     );

@@ -61,6 +61,7 @@ legend { width: 100%; padding-bottom: 9px; margin-bottom: 2px; border-bottom: 1p
 .select-row select { width: 100%; height: 38px; padding: 0 28px 0 10px; border: 1px solid #343d34; border-radius: 5px; outline: 0; color: var(--text); background: #0d120e; font-size: 11px; cursor: pointer; }
 .select-row select:focus { border-color: var(--accent-dim); box-shadow: 0 0 0 3px rgba(201, 242, 71, .07); }
 .dogbone-toggle { display: flex; align-items: center; gap: 10px; margin: 0 0 25px; padding: 11px 12px; border: 1px solid #303930; border-radius: 5px; color: #c8cec5; background: #0d120e; cursor: pointer; transition: border-color .18s, color .18s; }
+.dogbone-toggle + .dogbone-toggle { margin-top: -17px; }
 .dogbone-toggle:hover { border-color: #465046; color: var(--text); }
 .dogbone-toggle input { width: 15px; height: 15px; flex: 0 0 auto; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .dogbone-toggle input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -159,6 +160,7 @@ legend { width: 100%; padding-bottom: 9px; margin-bottom: 2px; border-bottom: 1p
 .viewer-footer.empty-mode .empty-legend-item { display: block; }
 .line-swatch { width: 13px; height: 2px; display: inline-block; margin: 0 6px 2px 0; }
 .line-swatch.cut { background: #edf0ea; }.line-swatch.pocket { background: var(--cyan); }
+.line-swatch.dogbone { background: #e57bd6; }
 .line-swatch.miter { background: repeating-linear-gradient(90deg, #f1b65c 0 5px, transparent 5px 8px); }
 .drawing-tools { position: absolute; right: 13px; top: 13px; display: grid; gap: 4px; }
 .drawing-tools button { width: 28px; height: 28px; border: 1px solid #303930; border-radius: 4px; color: #9da69a; background: rgba(13,18,14,.9); cursor: pointer; }

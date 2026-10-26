@@ -6,6 +6,8 @@ import { miteredCellSpan } from "./mesh.js";
 const form = document.querySelector("#boxForm");
 const inputs = [...form.querySelectorAll("input[data-expression-input]")];
 const dogboneCheckbox = document.querySelector("#use_dogbones");
+const separateDogboneCheckbox = document.querySelector("#separate_dogbone_cutter");
+const dogboneCutterSettingRows = [...document.querySelectorAll(".dogbone-cutter-setting")];
 const dimensionBasisSelect = document.querySelector("#dimension_basis");
 const wallConnectionSelect = document.querySelector("#wall_connection");
 const bottomTypeSelect = document.querySelector("#bottom_type");
@@ -109,6 +111,7 @@ const fieldLimits = {
   top_slot_offset: [0, 1000, .1],
   top_inset_depth: [.1, 30, .1],
   cutter_diameter: [.1, 50, .001],
+  dogbone_cutter_diameter: [.1, 50, .001],
 };
 const inchSteps = {
   width: ".01",
@@ -129,6 +132,7 @@ const inchSteps = {
   top_slot_offset: ".001",
   top_inset_depth: ".001",
   cutter_diameter: ".001",
+  dogbone_cutter_diameter: ".001",
 };
 
 const modelView = { yaw: -0.68, pitch: 0.48, zoom: 1, panX: 0, panY: 0 };
@@ -147,6 +151,7 @@ function readSpec() {
   return {
     ...values,
     use_dogbones: dogboneCheckbox.checked,
+    separate_dogbone_cutter: separateDogboneCheckbox.checked,
     dimension_basis: dimensionBasisSelect.value,
     wall_connection: wallConnectionSelect.value,
     bottom_type: bottomTypeSelect.value,
@@ -179,6 +184,7 @@ function updateJoineryControls() {
   jointClearanceSettingRows.forEach((row) => { row.hidden = !usesJointClearance; });
   hiddenFingerSettingRows.forEach((row) => { row.hidden = !hasHiddenFingers; });
   document.querySelector("#dogboneToggle").hidden = !hasFingerJoints;
+  updateDogboneCutterControls();
   document.querySelector("#joinerySettings").hidden = !hasFingerJoints && !hasPanelPocket;
   document.querySelector("#grooveLegend").hidden = !hasPanelPocket && !hasHiddenFingers;
   const pocketKinds = new Set([
@@ -189,6 +195,14 @@ function updateJoineryControls() {
   document.querySelector("#grooveLegendLabel").textContent = pocketKinds.size > 1 || hasHiddenFingers
     ? "Pocket cuts"
     : pocketKinds.has("inset") ? "Inset pocket" : "Panel groove";
+}
+
+function updateDogboneCutterControls() {
+  const offersSeparateCutter = !document.querySelector("#dogboneToggle").hidden && dogboneCheckbox.checked;
+  document.querySelector("#separateDogboneToggle").hidden = !offersSeparateCutter;
+  dogboneCutterSettingRows.forEach((row) => {
+    row.hidden = !offersSeparateCutter || !separateDogboneCheckbox.checked;
+  });
 }
 
 function updateTopTypeControls() {
@@ -292,6 +306,7 @@ function parseDxfSettings(text) {
     top_slot_depth: Number(metadata.bottom_slot_depth_mm ?? 6.35),
     top_slot_offset: Number(metadata.bottom_slot_offset_mm ?? metadata.wall_thickness_mm ?? 12.7),
     top_inset_depth: Number(metadata.bottom_inset_depth_mm ?? 3.175),
+    dogbone_cutter_diameter: 3.175,
   };
   for (const input of inputs) {
     const savedValue = input.name === "joint_clearance"
@@ -306,6 +321,11 @@ function parseDxfSettings(text) {
   const savedDogboneSetting = metadata.use_dogbones;
   if (savedDogboneSetting !== undefined && savedDogboneSetting !== "true" && savedDogboneSetting !== "false") {
     throw new Error("The DXF has an invalid saved dogbone setting");
+  }
+  const savedSeparateCutterSetting = metadata.separate_dogbone_cutter;
+  if (savedSeparateCutterSetting !== undefined
+      && savedSeparateCutterSetting !== "true" && savedSeparateCutterSetting !== "false") {
+    throw new Error("The DXF has an invalid saved separate dogbone cutter setting");
   }
   const savedBottomType = metadata.bottom_type ?? "captured";
   if (!Object.hasOwn(bottomTypeLabels, savedBottomType)) {
@@ -327,6 +347,7 @@ function parseDxfSettings(text) {
     units: importedUnit,
     values,
     useDogbones: savedDogboneSetting === undefined ? true : savedDogboneSetting === "true",
+    separateDogboneCutter: savedSeparateCutterSetting === "true",
     bottomType: savedBottomType,
     topType: savedTopType,
     wallConnection: savedWallConnection,
@@ -419,6 +440,8 @@ async function updateGeometry(successMessage = "Geometry ready") {
     document.querySelector("#dogboneSize").textContent = result.manufacturing.dogbones_enabled
       ? measure(result.manufacturing.dogbone_diameter)
       : "Off";
+    document.querySelector("#dogboneLegend").hidden = !result.entities.some((entity) =>
+      entity.layer.endsWith("_DOGBONE"));
     fitDrawing();
     drawModel();
     setStatus(successMessage, "ready");
@@ -1517,6 +1540,10 @@ function drawDrawing() {
     POCKET_HIDDEN_FINGERS: { color: "#72d8d3", width: 1, dash: [5, 3] },
     POCKET_HIDDEN_BOTTOM: { color: "#72d8d3", width: 1, dash: [5, 3] },
     POCKET_HIDDEN_TOP: { color: "#72d8d3", width: 1, dash: [5, 3] },
+    CUT_DOGBONE: { color: "#e57bd6", width: 1, dash: [] },
+    POCKET_HIDDEN_FINGERS_DOGBONE: { color: "#e57bd6", width: 1, dash: [5, 3] },
+    POCKET_HIDDEN_BOTTOM_DOGBONE: { color: "#e57bd6", width: 1, dash: [5, 3] },
+    POCKET_HIDDEN_TOP_DOGBONE: { color: "#e57bd6", width: 1, dash: [5, 3] },
     MITER_END: { color: "#f1b65c", width: 1, dash: [6, 3] },
     ANNOTATION: { color: "#748073", width: 1, dash: [] },
   };
@@ -1750,6 +1777,7 @@ dxfSettingsFile.addEventListener("change", async () => {
     clearTimeout(updateTimer);
     showMillimetreValues(imported.values, imported.units);
     dogboneCheckbox.checked = imported.useDogbones;
+    separateDogboneCheckbox.checked = imported.separateDogboneCutter;
     wallConnectionSelect.value = imported.wallConnection;
     bottomTypeSelect.value = imported.bottomType;
     topTypeSelect.value = imported.topType;
@@ -1776,7 +1804,14 @@ inputs.forEach((input) => {
     commitInputExpression(input);
   });
 });
-dogboneCheckbox.addEventListener("change", scheduleUpdate);
+dogboneCheckbox.addEventListener("change", () => {
+  updateDogboneCutterControls();
+  scheduleUpdate();
+});
+separateDogboneCheckbox.addEventListener("change", () => {
+  updateDogboneCutterControls();
+  scheduleUpdate();
+});
 dimensionBasisSelect.addEventListener("change", () => {
   updateDimensionBasisControls();
   scheduleUpdate();

@@ -82,6 +82,14 @@
             </span>
           </label>
 
+          <label class="dogbone-toggle" id="separateDogboneToggle" for="separate_dogbone_cutter">
+            <input id="separate_dogbone_cutter" name="separate_dogbone_cutter" type="checkbox" />
+            <span>
+              <strong>Separate dogbone cutter</strong>
+              <small>Cut profiles with the main cutter, then clear corners with a smaller one</small>
+            </span>
+          </label>
+
           <fieldset>
             <legend id="overallSizeLegend">Exterior size</legend>
             <div class="field-row">
@@ -163,6 +171,10 @@
             <div class="field-row finger-joint-setting">
               <label for="cutter_diameter">Cutter diameter <span>Ø</span></label>
               <div class="input-wrap"><input id="cutter_diameter" name="cutter_diameter" type="text" data-expression-input value="0.125" min="0.00394" max="1.9685" step="0.001" spellcheck="false" /><em>in</em></div>
+            </div>
+            <div class="field-row dogbone-cutter-setting" hidden>
+              <label for="dogbone_cutter_diameter">Dogbone cutter <span>Ød</span></label>
+              <div class="input-wrap"><input id="dogbone_cutter_diameter" name="dogbone_cutter_diameter" type="text" data-expression-input value="0.125" min="0.00394" max="1.9685" step="0.001" spellcheck="false" /><em>in</em></div>
             </div>
           </fieldset>
         </form>
@@ -256,6 +268,7 @@
           <div><span class="line-swatch cut"></span>Cut</div>
           <div><span class="line-swatch pocket"></span>Pocket</div>
           <div><span class="line-swatch miter"></span>Miter end</div>
+          <div id="dogboneLegend" hidden><span class="line-swatch dogbone"></span>Dogbone</div>
           <button id="downloadButton" class="download-button" type="button">
             <span>Download DXF</span>
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2v10m0 0 4-4m-4 4L6 8M3 15v2h14v-2"/></svg>

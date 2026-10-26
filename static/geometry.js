@@ -15,6 +15,7 @@ const FIELD_RULES = {
   top_slot_depth: [0.1, 50, 6.35],
   top_inset_depth: [0.1, 30, 3.175],
   cutter_diameter: [0.1, 50, 3.175],
+  dogbone_cutter_diameter: [0.1, 50, 3.175],
 };
 const BOTTOM_TYPES = new Set([
   "none", "captured", "inset", "butt_bottom", "butt_inside", "finger_jointed", "hidden_finger_jointed",
@@ -72,6 +73,16 @@ export function validateSpec(values) {
     throw new Error("use dogbones must be true or false");
   }
   spec.use_dogbones = rawDogboneSetting;
+
+  const rawSeparateCutterSetting = values.separate_dogbone_cutter ?? false;
+  if (rawSeparateCutterSetting !== true && rawSeparateCutterSetting !== false) {
+    throw new Error("separate dogbone cutter must be true or false");
+  }
+  spec.separate_dogbone_cutter = rawSeparateCutterSetting;
+  if (spec.use_dogbones && spec.separate_dogbone_cutter
+      && spec.dogbone_cutter_diameter > spec.cutter_diameter) {
+    throw new Error("dogbone cutter diameter must not exceed the main cutter diameter");
+  }
 
   const bottomType = values.bottom_type ?? "captured";
   if (!BOTTOM_TYPES.has(bottomType)) {
@@ -349,7 +360,12 @@ function cleanPolyline(points, { closed, tolerance = 1e-9 }) {
 
 function dogboneOutline(points, radius, offset = 0, maximumArcStep = Math.PI / 8) {
   if (points.length < 3 || radius <= 0) {
-    return { outline: points.map((point) => [...point]), bulges: points.map(() => 0), operations: [] };
+    return {
+      outline: points.map((point) => [...point]),
+      bulges: points.map(() => 0),
+      operations: [],
+      reliefArcs: [],
+    };
   }
   if (offset >= radius) throw new Error("joint clearance must be smaller than the cutter radius");
 
@@ -359,6 +375,7 @@ function dogboneOutline(points, radius, offset = 0, maximumArcStep = Math.PI / 8
   }, 0);
   const winding = twiceArea > 0 ? 1 : -1;
   const reliefs = new Map();
+  const reliefArcs = [];
 
   for (let index = 0; index < points.length; index += 1) {
     const current = points[index];
@@ -441,6 +458,7 @@ function dogboneOutline(points, radius, offset = 0, maximumArcStep = Math.PI / 8
       current[0] - incoming[0] * relief.incoming_trim,
       current[1] - incoming[1] * relief.incoming_trim,
     ];
+    const arcStart = outline.length;
     appendPoint(start);
     const end = [
       current[0] + outgoing[0] * relief.outgoing_trim,
@@ -461,15 +479,56 @@ function dogboneOutline(points, radius, offset = 0, maximumArcStep = Math.PI / 8
         center[1] + Math.sin(angle) * radius,
       ], segmentBulge);
     }
+    reliefArcs.push(reliefArc(index, current, incoming, outgoing, incomingLength, outgoingLength,
+      outline.slice(arcStart), bulges.slice(arcStart, -1)));
   }
 
   const operations = [...reliefs.values()].map(({ incoming_trim, outgoing_trim, ...operation }) => operation);
-  return { outline, bulges, operations };
+  return { outline, bulges, operations, reliefArcs };
+}
+
+function reliefArc(index, corner, incoming, outgoing, incomingLength, outgoingLength, points, bulges) {
+  return { index, corner: [...corner], incoming, outgoing, incomingLength, outgoingLength, points, bulges };
+}
+
+// When a separate, smaller cutter machines the dogbones, the main cutter only
+// follows the square-cornered profile and leaves a fillet of its own radius in
+// every inside corner. Each relief region covers that fillet (a square reaching
+// one main-cutter radius plus one dogbone radius along both edges) joined with
+// the dogbone arc, so pocketing the region with the small cutter finishes the
+// corner. The region's extra area lies in material the main cutter already removed.
+function dogboneReliefRegions(points, reliefArcs, mainRadius, dogboneRadius) {
+  const reliefIndices = new Set(reliefArcs.map(({ index }) => index));
+  for (let index = 0; index < points.length; index += 1) {
+    const endIndex = (index + 1) % points.length;
+    if (reliefIndices.has(index) && reliefIndices.has(endIndex)
+        && distance(points[index], points[endIndex]) < 2 * mainRadius - 1e-9) {
+      throw new Error("main cutter diameter is too large for the selected finger joints");
+    }
+  }
+  return reliefArcs.map(({ corner, incoming, outgoing, incomingLength, outgoingLength, points: arc, bulges }) => {
+    const incomingReach = Math.min(mainRadius + dogboneRadius, incomingLength);
+    const outgoingReach = Math.min(mainRadius + dogboneRadius, outgoingLength);
+    const alongOutgoing = [corner[0] + outgoing[0] * outgoingReach, corner[1] + outgoing[1] * outgoingReach];
+    const alongIncoming = [corner[0] - incoming[0] * incomingReach, corner[1] - incoming[1] * incomingReach];
+    const outline = [
+      ...arc.map((point) => [...point]),
+      alongOutgoing,
+      [alongOutgoing[0] - incoming[0] * incomingReach, alongOutgoing[1] - incoming[1] * incomingReach],
+      alongIncoming,
+    ];
+    return { outline, bulges: [...bulges, 0, 0, 0, 0] };
+  });
 }
 
 function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximumArcStep = Math.PI / 8) {
   if (!reliefIndices.length || radius <= 0) {
-    return { outline: points.map((point) => [...point]), bulges: points.map(() => 0), operations: [] };
+    return {
+      outline: points.map((point) => [...point]),
+      bulges: points.map(() => 0),
+      operations: [],
+      reliefArcs: [],
+    };
   }
   if (offset >= radius) throw new Error("joint clearance must be smaller than the cutter radius");
 
@@ -480,6 +539,7 @@ function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximum
   const winding = twiceArea > 0 ? 1 : -1;
 
   const reliefs = new Map();
+  const reliefArcs = [];
   for (const index of reliefIndices) {
     const current = points[index];
     const previous = points[(index - 1 + points.length) % points.length];
@@ -563,6 +623,7 @@ function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximum
       current[0] + outgoing[0] * relief.outgoing_trim,
       current[1] + outgoing[1] * relief.outgoing_trim,
     ];
+    const arcStart = outline.length;
     appendPoint(start);
     const startAngle = Math.atan2(start[1] - center[1], start[0] - center[0]);
     const endAngle = Math.atan2(end[1] - center[1], end[0] - center[0]);
@@ -580,10 +641,12 @@ function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximum
         center[1] + Math.sin(angle) * radius,
       ], segmentBulge);
     }
+    reliefArcs.push(reliefArc(index, current, incoming, outgoing, incomingLength, outgoingLength,
+      outline.slice(arcStart), bulges.slice(arcStart, -1)));
   }
 
   const operations = [...reliefs.values()].map(({ incoming_trim, outgoing_trim, ...operation }) => operation);
-  return { outline, bulges, operations };
+  return { outline, bulges, operations, reliefArcs };
 }
 
 function fingeredPanel({
@@ -601,6 +664,7 @@ function fingeredPanel({
   grooveDepth,
   topGrooveDepth = 0,
   cutterDiameter,
+  dogboneCutterDiameter = null,
   jointClearance,
   useDogbones,
   bottomMode = "plain",
@@ -640,18 +704,42 @@ function fingeredPanel({
   }
 
   const squareOutline = cleanPolyline(outline, { closed: true });
+  const separateDogbones = useDogbones && dogboneCutterDiameter != null;
+  const dogboneRadius = (separateDogbones ? dogboneCutterDiameter : cutterDiameter) / 2;
   const routedOutline = useDogbones
-    ? dogboneOutline(squareOutline, cutterDiameter / 2, jointClearance)
+    ? dogboneOutline(squareOutline, dogboneRadius, jointClearance)
     : { outline: squareOutline, bulges: squareOutline.map(() => 0), operations: [] };
-  const translatedOutline = routedOutline.outline.map(([px, py]) => [px + x, py + y]);
   const operations = [...routedOutline.operations];
-  const entities = [{
-    type: "polyline",
-    layer: "CUT_OUTSIDE",
-    closed: true,
-    points: translatedOutline,
-    bulges: routedOutline.bulges,
-  }];
+  const entities = [];
+  const addRoutedPath = (points, routed, layer, reliefLayer) => {
+    if (!separateDogbones) {
+      entities.push({
+        type: "polyline",
+        layer,
+        closed: true,
+        points: routed.outline.map(([px, py]) => [px + x, py + y]),
+        bulges: routed.bulges,
+      });
+      return;
+    }
+    entities.push({
+      type: "polyline",
+      layer,
+      closed: true,
+      points: points.map(([px, py]) => [px + x, py + y]),
+      bulges: points.map(() => 0),
+    });
+    for (const region of dogboneReliefRegions(points, routed.reliefArcs, cutterDiameter / 2, dogboneRadius)) {
+      entities.push({
+        type: "polyline",
+        layer: reliefLayer,
+        closed: true,
+        points: region.outline.map(([px, py]) => [px + x, py + y]),
+        bulges: region.bulges,
+      });
+    }
+  };
+  addRoutedPath(squareOutline, routedOutline, "CUT_OUTSIDE", "CUT_DOGBONE");
 
   const addGroove = (grooveRect, depth, layer) => {
     if (!grooveRect) return;
@@ -708,19 +796,13 @@ function fingeredPanel({
       if (px + pw < width - 1e-9) reliefIndices.push(1);
     }
     const routedPocket = useDogbones
-      ? dogbonePocketOutline(pocketOutline, reliefIndices, cutterDiameter / 2, jointClearance)
-      : { outline: pocketOutline, bulges: pocketOutline.map(() => 0), operations: [] };
+      ? dogbonePocketOutline(pocketOutline, reliefIndices, dogboneRadius, jointClearance)
+      : { outline: pocketOutline, bulges: pocketOutline.map(() => 0), operations: [], reliefArcs: [] };
     operations.push(...routedPocket.operations.map((operation) => ({
       ...operation,
       depth: hiddenPocketDepth,
     })));
-    entities.push({
-      type: "polyline",
-      layer: "POCKET_HIDDEN_FINGERS",
-      closed: true,
-      points: routedPocket.outline.map(([pointX, pointY]) => [x + pointX, y + pointY]),
-      bulges: routedPocket.bulges,
-    });
+    addRoutedPath(pocketOutline, routedPocket, "POCKET_HIDDEN_FINGERS", "POCKET_HIDDEN_FINGERS_DOGBONE");
   };
   if (hiddenVerticalPockets) {
     const reach = hiddenVerticalPocketReach ?? jointDepth + jointClearance;
@@ -822,6 +904,7 @@ function panelPart({
   fingerSize,
   jointDepth,
   cutterDiameter,
+  dogboneCutterDiameter = null,
   useDogbones,
   label,
   name,
@@ -854,10 +937,24 @@ function panelPart({
     outline.push(...(outline.length ? edge.slice(1) : edge));
   }
   const squareOutline = cleanPolyline(outline, { closed: true });
+  const separateDogbones = useDogbones && dogboneCutterDiameter != null;
+  const dogboneRadius = (separateDogbones ? dogboneCutterDiameter : cutterDiameter) / 2;
   const routedOutline = useDogbones
-    ? dogboneOutline(squareOutline, cutterDiameter / 2, 0)
-    : { outline: squareOutline, bulges: squareOutline.map(() => 0), operations: [] };
-  const translatedOutline = routedOutline.outline.map(([px, py]) => [px + x, py + y]);
+    ? dogboneOutline(squareOutline, dogboneRadius, 0)
+    : { outline: squareOutline, bulges: squareOutline.map(() => 0), operations: [], reliefArcs: [] };
+  const cutOutline = separateDogbones
+    ? { outline: squareOutline, bulges: squareOutline.map(() => 0) }
+    : routedOutline;
+  const translatedOutline = cutOutline.outline.map(([px, py]) => [px + x, py + y]);
+  const reliefEntities = (points, routed, layer) => (separateDogbones
+    ? dogboneReliefRegions(points, routed.reliefArcs, cutterDiameter / 2, dogboneRadius)
+    : []).map((region) => ({
+    type: "polyline",
+    layer,
+    closed: true,
+    points: region.outline.map(([px, py]) => [x + px, y + py]),
+    bulges: region.bulges,
+  }));
   const bounds = {
     minX: Math.min(...routedOutline.outline.map(([px]) => px)),
     maxX: Math.max(...routedOutline.outline.map(([px]) => px)),
@@ -868,7 +965,7 @@ function panelPart({
     ...routedOutline.operations,
     ...insetPockets.map((rect) => ({ type: "inset_pocket", rect, depth: insetPocketDepth })),
   ];
-  const hiddenPocketEntities = hiddenPocketGroups.map((group) => {
+  const hiddenPocketEntities = hiddenPocketGroups.flatMap((group) => {
     operations.push(...group.rects.map((rect) => ({
       type: "hidden_finger_pocket",
       rect,
@@ -878,25 +975,32 @@ function panelPart({
       ? dogbonePocketOutline(
         group.outline,
         group.reliefIndices,
-        cutterDiameter / 2,
+        dogboneRadius,
         0,
       )
       : {
         outline: group.outline,
         bulges: group.outline.map(() => 0),
         operations: [],
+        reliefArcs: [],
       };
     operations.push(...routedPocket.operations.map((operation) => ({
       ...operation,
       depth: hiddenPocketDepth,
     })));
-    return {
-      type: "polyline",
-      layer: hiddenPocketLayer,
-      closed: true,
-      points: routedPocket.outline.map(([px, py]) => [x + px, y + py]),
-      bulges: routedPocket.bulges,
-    };
+    const pocketPath = separateDogbones
+      ? { outline: group.outline, bulges: group.outline.map(() => 0) }
+      : routedPocket;
+    return [
+      {
+        type: "polyline",
+        layer: hiddenPocketLayer,
+        closed: true,
+        points: pocketPath.outline.map(([px, py]) => [x + px, y + py]),
+        bulges: pocketPath.bulges,
+      },
+      ...reliefEntities(group.outline, routedPocket, `${hiddenPocketLayer}_DOGBONE`),
+    ];
   });
   const entities = [
     {
@@ -904,8 +1008,9 @@ function panelPart({
       layer: "CUT_OUTSIDE",
       closed: true,
       points: translatedOutline,
-      bulges: routedOutline.bulges,
+      bulges: cutOutline.bulges,
     },
+    ...reliefEntities(squareOutline, routedOutline, "CUT_DOGBONE"),
     ...insetPockets.map((rect) => {
       const [px, py, pw, ph] = rect;
       return {
@@ -1122,6 +1227,7 @@ export function buildLayout(values) {
     : insetTop ? spec.height - (spec.top_thickness - spec.top_inset_depth)
       : hiddenFingerTop ? spec.height - spec.hidden_finger_skin : spec.height;
   const wallHeight = wallTopZ - wallBaseZ;
+  const dogboneCutterDiameter = spec.separate_dogbone_cutter ? spec.dogbone_cutter_diameter : null;
   const assembledHeight = spec.height;
 
   const common = {
@@ -1132,6 +1238,7 @@ export function buildLayout(values) {
     grooveDepth: bottomPocketDepth,
     topGrooveDepth: topPocketDepth,
     cutterDiameter: spec.cutter_diameter,
+    dogboneCutterDiameter,
     jointClearance: spec.joint_clearance,
     useDogbones: spec.use_dogbones,
     bottomMode: fingerJointedBottom ? "slot" : "plain",
@@ -1317,6 +1424,7 @@ export function buildLayout(values) {
       fingerSize: spec.finger_size,
       jointDepth: bottomConfig.jointDepth,
       cutterDiameter: spec.cutter_diameter,
+      dogboneCutterDiameter,
       useDogbones: spec.use_dogbones,
       label: bottomConfig.label,
       name: "BOTTOM",
@@ -1409,6 +1517,7 @@ export function buildLayout(values) {
       fingerSize: spec.finger_size,
       jointDepth: topConfig.jointDepth,
       cutterDiameter: spec.cutter_diameter,
+      dogboneCutterDiameter,
       useDogbones: spec.use_dogbones,
       label: topConfig.label,
       name: "TOP",
@@ -1459,7 +1568,8 @@ export function buildLayout(values) {
       has_top_groove: capturedTop,
       has_top_pocket: capturedTop || insetTop,
       dogbones_enabled: spec.use_dogbones,
-      dogbone_diameter: roundTo(spec.cutter_diameter, 3),
+      separate_dogbone_cutter: spec.use_dogbones && spec.separate_dogbone_cutter,
+      dogbone_diameter: roundTo(dogboneCutterDiameter ?? spec.cutter_diameter, 3),
       joint_clearance: roundTo(spec.joint_clearance, 3),
       hidden_finger_skin: roundTo(spec.hidden_finger_skin, 3),
       hidden_finger_pocket_depth: (hiddenFingerWalls || hiddenFingerBottom || hiddenFingerTop)

@@ -90,6 +90,19 @@ previous Python implementation for exact layout and byte-for-byte DXF parity.
   dogbone center the same distance back toward the corner along its 45-degree
   bisector. Hidden fingers also leave this clearance between each concealed
   finger end and the neighboring exterior skin.
+- **Separate dogbone cutter** lets a larger main cutter (for example 1/4 inch)
+  cut the parts while a smaller, separately specified cutter (for example
+  1/8 inch) clears the inside corners. In this mode `CUT_OUTSIDE` and the
+  hidden-finger pocket layers keep square inside corners for the main cutter,
+  and each inside corner gets a closed relief region to pocket with the small
+  cutter. Each region joins the dogbone arc with a square that reaches one
+  main-cutter radius plus one dogbone radius along both edges, so it also
+  clears the fillet the main cutter leaves behind. Through-cut reliefs go on
+  `CUT_DOGBONE_<diameter><unit>`, such as `CUT_DOGBONE_0.125IN`; hidden-finger
+  pocket reliefs go on the matching pocket layer with the same suffix, such as
+  `POCKET_HIDDEN_FINGERS_0.410IN_DOGBONE_0.125IN`, and use that layer's depth.
+  The dogbone cutter cannot be larger than the main cutter, and the main cutter
+  must fit between neighboring inside corners.
 - `ANNOTATION` contains part labels and should not be cut.
 
 The layout intentionally leaves CAM operations, feeds, speeds, hold-down tabs, kerf compensation, and stock nesting to the machine operator. Always verify the file in your CAM package and make a test joint before cutting final material.
