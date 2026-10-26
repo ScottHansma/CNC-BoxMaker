@@ -51,7 +51,7 @@ export function layoutToDxf(layout, units = "mm") {
   const hiddenBottomPocketLayer = `POCKET_HIDDEN_BOTTOM_${hiddenBottomPocketDepth.toFixed(3)}${units.toUpperCase()}`;
   const hiddenTopPocketDepth = layout.manufacturing.hidden_top_pocket_depth * scale;
   const hiddenTopPocketLayer = `POCKET_HIDDEN_TOP_${hiddenTopPocketDepth.toFixed(3)}${units.toUpperCase()}`;
-  const dogboneSuffix = `DOGBONE_${(layout.manufacturing.dogbone_diameter * scale).toFixed(3)}${units.toUpperCase()}`;
+  const dogboneSuffix = `DOGBONE_${(layout.manufacturing.dogbone_diameter * scale).toFixed(3)}${units.toUpperCase()}_CENTERLINE`;
   const dogboneLayers = layout.manufacturing.separate_dogbone_cutter ? {
     CUT_DOGBONE: `CUT_${dogboneSuffix}`,
     POCKET_HIDDEN_FINGERS_DOGBONE: `${hiddenPocketLayer}_${dogboneSuffix}`,

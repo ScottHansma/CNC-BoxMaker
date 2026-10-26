@@ -914,7 +914,42 @@ const pointInPolygon = ([px, py], polygon) => {
   return inside;
 };
 
-test("separate dogbone cutter keeps square main profiles and adds relief regions", () => {
+// Expands an open polyline with bulges into closely spaced points along its path.
+const samplePath = (entity, step = 0.02) => {
+  const samples = [];
+  for (let index = 0; index + 1 < entity.points.length; index += 1) {
+    const [start, end] = [entity.points[index], entity.points[index + 1]];
+    const bulge = entity.bulges[index];
+    const chord = Math.hypot(end[0] - start[0], end[1] - start[1]);
+    const count = Math.max(2, Math.ceil(chord / step));
+    if (!bulge) {
+      for (let sample = 0; sample <= count; sample += 1) {
+        samples.push([start[0] + (end[0] - start[0]) * sample / count, start[1] + (end[1] - start[1]) * sample / count]);
+      }
+      continue;
+    }
+    const sweep = 4 * Math.atan(bulge);
+    const offset = chord / 2 / Math.tan(sweep / 2);
+    const left = [-(end[1] - start[1]) / chord, (end[0] - start[0]) / chord];
+    const center = [(start[0] + end[0]) / 2 + left[0] * offset, (start[1] + end[1]) / 2 + left[1] * offset];
+    const radius = Math.hypot(start[0] - center[0], start[1] - center[1]);
+    const startAngle = Math.atan2(start[1] - center[1], start[0] - center[0]);
+    for (let sample = 0; sample <= count; sample += 1) {
+      const angle = startAngle + sweep * sample / count;
+      samples.push([center[0] + Math.cos(angle) * radius, center[1] + Math.sin(angle) * radius]);
+    }
+  }
+  return samples;
+};
+
+const segmentDistance = (point, start, end) => {
+  const along = [end[0] - start[0], end[1] - start[1]];
+  const lengthSquared = along[0] ** 2 + along[1] ** 2;
+  const t = Math.max(0, Math.min(1, ((point[0] - start[0]) * along[0] + (point[1] - start[1]) * along[1]) / lengthSquared));
+  return Math.hypot(point[0] - start[0] - along[0] * t, point[1] - start[1] - along[1] * t);
+};
+
+test("separate dogbone cutter keeps square main profiles and adds paired centre-line reliefs", () => {
   const layout = buildLayout(SEPARATE_CUTTER);
   assert.equal(layout.spec.separate_dogbone_cutter, true);
   assert.equal(layout.manufacturing.separate_dogbone_cutter, true);
@@ -922,65 +957,101 @@ test("separate dogbone cutter keeps square main profiles and adds relief regions
   const cutPaths = layout.entities.filter((entity) => entity.layer === "CUT_OUTSIDE");
   assert.ok(cutPaths.every((entity) => entity.bulges.every((bulge) => bulge === 0)));
   const reliefs = layout.entities.filter((entity) => entity.layer === "CUT_DOGBONE");
-  const dogbones = layout.parts.flatMap((part) => part.operations.filter((operation) => operation.type === "dogbone"));
-  assert.ok(dogbones.length);
-  assert.equal(reliefs.length, dogbones.length);
-  assert.ok(dogbones.every((operation) => operation.radius === 3.175 / 2));
-  assert.ok(reliefs.every((entity) => entity.closed && entity.bulges.length === entity.points.length));
+  assert.ok(reliefs.every((entity) => !entity.closed && entity.bulges.length === entity.points.length));
   assert.ok(reliefs.every((entity) => entity.bulges.some((bulge) => Math.abs(bulge) > 0)));
-});
-
-test("separate dogbone reliefs clear the main cutter fillet without cutting into the part", () => {
-  const layout = buildLayout(SEPARATE_CUTTER);
-  const mainRadius = SEPARATE_CUTTER.cutter_diameter / 2;
-  const reliefs = layout.entities.filter((entity) => entity.layer === "CUT_DOGBONE");
+  let pairedPaths = 0;
   for (const part of layout.parts.slice(0, 4)) {
     const [ox, oy] = part.layout_origin;
     const dogbones = part.operations.filter((operation) => operation.type === "dogbone");
-    const partRegions = reliefs
-      .map((entity) => entity.points.map(([px, py]) => [px - ox, py - oy]))
-      .filter((region) => dogbones.some((operation) => pointInPolygon([operation.cx, operation.cy], region)));
-    assert.equal(partRegions.length, dogbones.length);
-    for (const operation of dogbones) {
-      const region = partRegions.find((candidate) => pointInPolygon([operation.cx, operation.cy], candidate));
-      const bisector = [operation.cx - operation.corner[0], operation.cy - operation.corner[1]];
-      const bisectorLength = Math.hypot(...bisector);
-      const unit = bisector.map((value) => value / bisectorLength);
-      const edges = [
-        [(unit[0] - unit[1]) / Math.SQRT2, (unit[0] + unit[1]) / Math.SQRT2],
-        [(unit[0] + unit[1]) / Math.SQRT2, (unit[1] - unit[0]) / Math.SQRT2],
-      ];
-      const at = (a, b) => [
-        operation.corner[0] + edges[0][0] * a + edges[1][0] * b,
-        operation.corner[1] + edges[0][1] * a + edges[1][1] * b,
-      ];
-      const mainCenter = at(mainRadius, mainRadius);
-      // The odd grid offset keeps samples off the profile edges themselves.
-      for (let a = -mainRadius + 0.0137; a <= 2 * mainRadius; a += mainRadius / 20) {
-        for (let b = -mainRadius + 0.0137; b <= 2 * mainRadius; b += mainRadius / 20) {
-          const point = at(a, b);
-          const inMaterial = pointInPolygon(point, part.diagnostic_profile);
-          const inDogbone = Math.hypot(point[0] - operation.cx, point[1] - operation.cy) < operation.radius - 0.05;
-          const missedByMainCutter = a > 0.05 && b > 0.05 && a < mainRadius && b < mainRadius
-            && Math.hypot(point[0] - mainCenter[0], point[1] - mainCenter[1]) > mainRadius + 0.05;
-          const inRegion = pointInPolygon(point, region);
-          if (inDogbone || missedByMainCutter) assert.ok(inRegion, `uncleared point ${point}`);
-          if (inRegion && inMaterial) {
+    assert.ok(dogbones.length);
+    assert.ok(dogbones.every((operation) => operation.radius === 3.175 / 2));
+    // Every dogbone centre is a vertex of exactly one relief path, and slot
+    // bottoms share a path between their two corners.
+    const centresOnPath = reliefs.map((entity) => dogbones.filter((operation) =>
+      entity.points.some(([px, py]) => Math.hypot(px - ox - operation.cx, py - oy - operation.cy) < 1e-9)).length);
+    assert.equal(centresOnPath.reduce((sum, count) => sum + count, 0), dogbones.length);
+    assert.ok(centresOnPath.every((count) => count <= 2));
+    pairedPaths += centresOnPath.filter((count) => count === 2).length;
+  }
+  assert.ok(pairedPaths > 0);
+  assert.ok(reliefs.length < layout.parts.slice(0, 4)
+    .reduce((sum, part) => sum + part.operations.filter((operation) => operation.type === "dogbone").length, 0));
+});
+
+for (const [clearance, allowedOvercut] of [[0, 1e-6], [0.127, 0.01], [0.254, 0.035]]) {
+  test(`separate dogbone reliefs clear the main cutter fillet with ${clearance} mm clearance`, () => {
+    const spec = { ...SEPARATE_CUTTER, joint_clearance: clearance };
+    const layout = buildLayout(spec);
+    const mainRadius = spec.cutter_diameter / 2;
+    const dogboneRadius = spec.dogbone_cutter_diameter / 2;
+    const reliefs = layout.entities.filter((entity) => entity.layer === "CUT_DOGBONE");
+    for (const part of layout.parts.slice(0, 4)) {
+      const [ox, oy] = part.layout_origin;
+      const profile = part.diagnostic_profile;
+      const edges = profile.map((point, index) => [point, profile[(index + 1) % profile.length]]);
+      const dogbones = part.operations.filter((operation) => operation.type === "dogbone");
+      const paths = reliefs
+        .filter((entity) => dogbones.some((operation) => entity.points.some(([px, py]) =>
+          Math.hypot(px - ox - operation.cx, py - oy - operation.cy) < 1e-9)))
+        .map((entity) => samplePath({ ...entity, points: entity.points.map(([px, py]) => [px - ox, py - oy]) }));
+      const centres = paths.flat();
+      // Anything the cutter removes from the part must lie in a dogbone; the
+      // rest is overcut, measured as its depth past both the dogbone and the wall.
+      let worstOvercut = 0;
+      for (const centre of centres) {
+        for (let step = 0; step < 72; step += 1) {
+          const angle = step * Math.PI / 36;
+          const point = [
+            centre[0] + Math.cos(angle) * (dogboneRadius - 1e-4),
+            centre[1] + Math.sin(angle) * (dogboneRadius - 1e-4),
+          ];
+          const outsideDogbones = Math.min(...dogbones.map((operation) =>
+            Math.hypot(point[0] - operation.cx, point[1] - operation.cy) - operation.radius));
+          if (outsideDogbones <= worstOvercut || !pointInPolygon(point, profile)) continue;
+          const depth = Math.min(outsideDogbones, ...edges
+            .filter(([start]) => Math.hypot(start[0] - point[0], start[1] - point[1]) < 4 * mainRadius + spec.finger_size)
+            .map(([start, end]) => segmentDistance(point, start, end)));
+          worstOvercut = Math.max(worstOvercut, depth);
+        }
+      }
+      assert.ok(worstOvercut <= allowedOvercut, `overcut ${worstOvercut}`);
+      for (const operation of dogbones) {
+        const bisector = [operation.cx - operation.corner[0], operation.cy - operation.corner[1]];
+        const bisectorLength = Math.hypot(...bisector);
+        const unit = bisector.map((value) => value / bisectorLength);
+        const walls = [
+          [(unit[0] - unit[1]) / Math.SQRT2, (unit[0] + unit[1]) / Math.SQRT2],
+          [(unit[0] + unit[1]) / Math.SQRT2, (unit[1] - unit[0]) / Math.SQRT2],
+        ];
+        const at = (a, b) => [
+          operation.corner[0] + walls[0][0] * a + walls[1][0] * b,
+          operation.corner[1] + walls[0][1] * a + walls[1][1] * b,
+        ];
+        const mainCenter = at(mainRadius, mainRadius);
+        const nearby = centres.filter((centre) =>
+          Math.hypot(centre[0] - operation.corner[0], centre[1] - operation.corner[1]) < 2 * mainRadius + dogboneRadius);
+        // The odd grid offset keeps samples off the profile edges themselves.
+        for (let a = 0.0137; a < mainRadius; a += mainRadius / 20) {
+          for (let b = 0.0137; b < mainRadius; b += mainRadius / 20) {
+            const point = at(a, b);
+            const inDogbone = Math.hypot(point[0] - operation.cx, point[1] - operation.cy) < operation.radius - 0.01;
+            const missedByMainCutter = Math.hypot(point[0] - mainCenter[0], point[1] - mainCenter[1]) > mainRadius + 0.01;
+            if (!inDogbone && !missedByMainCutter) continue;
             assert.ok(
-              Math.hypot(point[0] - operation.cx, point[1] - operation.cy) <= operation.radius + 0.05,
-              `relief cuts into the part at ${point}`,
+              nearby.some((centre) => Math.hypot(point[0] - centre[0], point[1] - centre[1]) <= dogboneRadius + 0.01),
+              `uncleared point ${point}`,
             );
           }
         }
       }
     }
-  }
-});
+  });
+}
 
 test("separate dogbone cutter writes tool-named DXF layers and settings", () => {
   const dxf = layoutToDxf(buildLayout(SEPARATE_CUTTER), "in");
-  assert.match(dxf, /2\nCUT_DOGBONE_0\.125IN\n/);
-  assert.match(dxf, /8\nCUT_DOGBONE_0\.125IN\n/);
+  assert.match(dxf, /2\nCUT_DOGBONE_0\.125IN_CENTERLINE\n/);
+  assert.match(dxf, /8\nCUT_DOGBONE_0\.125IN_CENTERLINE\n100\nAcDbPolyline\n90\n\d+\n70\n0\n/);
   assert.ok(dxf.includes("999\nseparate_dogbone_cutter=true"));
   assert.ok(dxf.includes("999\ndogbone_cutter_diameter_mm=3.175"));
   assert.ok(dxf.includes("999\ncutter_diameter_mm=6.35"));
@@ -1008,12 +1079,13 @@ test("separate dogbone cutter adds relief pockets to hidden-finger joinery", () 
     part.operations.filter((operation) => operation.type === "hidden_finger_relief"));
   assert.ok(reliefOperations.length);
   assert.ok(reliefOperations.every((operation) => operation.radius === 3.175 / 2));
-  assert.equal(
-    layout.entities.filter((entity) => entity.layer.startsWith("POCKET_HIDDEN") && entity.layer.endsWith("_DOGBONE")).length,
-    reliefOperations.length,
-  );
+  const reliefPaths = layout.entities
+    .filter((entity) => entity.layer.startsWith("POCKET_HIDDEN") && entity.layer.endsWith("_DOGBONE"));
+  assert.ok(reliefPaths.every((entity) => !entity.closed));
+  assert.ok(reliefPaths.length <= reliefOperations.length);
+  assert.ok(reliefPaths.length >= reliefOperations.length / 2);
   const dxf = layoutToDxf(layout, "in");
-  assert.match(dxf, /8\nPOCKET_HIDDEN_FINGERS_0\.410IN_DOGBONE_0\.125IN\n/);
+  assert.match(dxf, /8\nPOCKET_HIDDEN_FINGERS_0\.410IN_DOGBONE_0\.125IN_CENTERLINE\n/);
 });
 
 test("separate dogbone cutter is ignored when dogbones are off", () => {

@@ -94,15 +94,26 @@ previous Python implementation for exact layout and byte-for-byte DXF parity.
   cut the parts while a smaller, separately specified cutter (for example
   1/8 inch) clears the inside corners. In this mode `CUT_OUTSIDE` and the
   hidden-finger pocket layers keep square inside corners for the main cutter,
-  and each inside corner gets a closed relief region to pocket with the small
-  cutter. Each region joins the dogbone arc with a square that reaches one
-  main-cutter radius plus one dogbone radius along both edges, so it also
-  clears the fillet the main cutter leaves behind. Through-cut reliefs go on
-  `CUT_DOGBONE_<diameter><unit>`, such as `CUT_DOGBONE_0.125IN`; hidden-finger
-  pocket reliefs go on the matching pocket layer with the same suffix, such as
-  `POCKET_HIDDEN_FINGERS_0.410IN_DOGBONE_0.125IN`, and use that layer's depth.
-  The dogbone cutter cannot be larger than the main cutter, and the main cutter
-  must fit between neighboring inside corners.
+  and the inside corners get open centre-line paths for the small cutter. Cut
+  them with no tool offset ("No Offset" / "On" in most CAM packages), after
+  the main profile or pocket has been cut, so the small cutter only trims
+  corners in already-cleared space. Each path runs along both walls far enough
+  to clear the fillet the main cutter leaves behind and passes through the
+  dogbone centre; the two corners at the bottom of a slot share one path that
+  crosses the slot bottom, so there is roughly one path per slot rather than
+  one per corner. With zero joint clearance the cutter never touches the
+  walls. With clearance, the dogbone centre sits slightly off the wall
+  diagonal and the cutter grazes the far wall by about 0.009 mm at 0.005 inch
+  of clearance and 0.033 mm at the 0.01 inch default, well below what a
+  router can hold. Through-cut paths go on
+  `CUT_DOGBONE_<diameter><unit>_CENTERLINE`, such as
+  `CUT_DOGBONE_0.125IN_CENTERLINE`; hidden-finger pocket paths go on the
+  matching pocket layer with the same suffix, such as
+  `POCKET_HIDDEN_FINGERS_0.410IN_DOGBONE_0.125IN_CENTERLINE`, and use that
+  layer's depth. The dogbone cutter cannot be larger than the main cutter, the
+  main cutter must fit between neighboring inside corners, and the main cutter
+  can be at most about 6.8 times the dogbone cutter's diameter so the two wall
+  passes still meet across its fillet.
 - `ANNOTATION` contains part labels and should not be cut.
 
 The layout intentionally leaves CAM operations, feeds, speeds, hold-down tabs, kerf compensation, and stock nesting to the machine operator. Always verify the file in your CAM package and make a test joint before cutting final material.

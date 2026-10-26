@@ -458,7 +458,6 @@ function dogboneOutline(points, radius, offset = 0, maximumArcStep = Math.PI / 8
       current[0] - incoming[0] * relief.incoming_trim,
       current[1] - incoming[1] * relief.incoming_trim,
     ];
-    const arcStart = outline.length;
     appendPoint(start);
     const end = [
       current[0] + outgoing[0] * relief.outgoing_trim,
@@ -479,25 +478,23 @@ function dogboneOutline(points, radius, offset = 0, maximumArcStep = Math.PI / 8
         center[1] + Math.sin(angle) * radius,
       ], segmentBulge);
     }
-    reliefArcs.push(reliefArc(index, current, incoming, outgoing, incomingLength, outgoingLength,
-      outline.slice(arcStart), bulges.slice(arcStart, -1)));
+    reliefArcs.push({ index, corner: [...current], incoming, outgoing });
   }
 
   const operations = [...reliefs.values()].map(({ incoming_trim, outgoing_trim, ...operation }) => operation);
   return { outline, bulges, operations, reliefArcs };
 }
 
-function reliefArc(index, corner, incoming, outgoing, incomingLength, outgoingLength, points, bulges) {
-  return { index, corner: [...corner], incoming, outgoing, incomingLength, outgoingLength, points, bulges };
-}
-
 // When a separate, smaller cutter machines the dogbones, the main cutter only
 // follows the square-cornered profile and leaves a fillet of its own radius in
-// every inside corner. Each relief region covers that fillet (a square reaching
-// one main-cutter radius plus one dogbone radius along both edges) joined with
-// the dogbone arc, so pocketing the region with the small cutter finishes the
-// corner. The region's extra area lies in material the main cutter already removed.
-function dogboneReliefRegions(points, reliefArcs, mainRadius, dogboneRadius) {
+// every inside corner. Each relief is an open centre-line path for the dogbone
+// cutter (cut with no tool offset): it runs along both walls out to where the
+// main cutter's fillet ends and reaches the dogbone centre by pivoting around
+// the point where the dogbone meets each wall. A cutter exactly the dogbone's
+// size can only sit on that centre without touching the walls when there is no
+// joint clearance; with clearance, the pivot leaves it nicking the far wall by a
+// few microns, which is far below machine tolerance.
+function dogboneReliefPaths(points, reliefArcs, mainRadius, dogboneRadius, offset = 0, maximumArcStep = Math.PI / 8) {
   const reliefIndices = new Set(reliefArcs.map(({ index }) => index));
   for (let index = 0; index < points.length; index += 1) {
     const endIndex = (index + 1) % points.length;
@@ -506,19 +503,76 @@ function dogboneReliefRegions(points, reliefArcs, mainRadius, dogboneRadius) {
       throw new Error("main cutter diameter is too large for the selected finger joints");
     }
   }
-  return reliefArcs.map(({ corner, incoming, outgoing, incomingLength, outgoingLength, points: arc, bulges }) => {
-    const incomingReach = Math.min(mainRadius + dogboneRadius, incomingLength);
-    const outgoingReach = Math.min(mainRadius + dogboneRadius, outgoingLength);
-    const alongOutgoing = [corner[0] + outgoing[0] * outgoingReach, corner[1] + outgoing[1] * outgoingReach];
-    const alongIncoming = [corner[0] - incoming[0] * incomingReach, corner[1] - incoming[1] * incomingReach];
-    const outline = [
-      ...arc.map((point) => [...point]),
-      alongOutgoing,
-      [alongOutgoing[0] - incoming[0] * incomingReach, alongOutgoing[1] - incoming[1] * incomingReach],
-      alongIncoming,
+  // The two wall passes each clear a band two dogbone radii wide; beyond this
+  // ratio part of the main cutter's fillet between them would be left behind.
+  if (Math.SQRT2 * (mainRadius - 2 * dogboneRadius) >= mainRadius) {
+    throw new Error("main cutter diameter is too large to finish with the dogbone cutter");
+  }
+  const centerOffset = (dogboneRadius - offset) / Math.SQRT2;
+  const trim = centerOffset + Math.sqrt(dogboneRadius ** 2 - centerOffset ** 2);
+  const reach = Math.max(mainRadius, trim);
+  const cornerPaths = new Map(reliefArcs.map(({ index, corner, incoming, outgoing }) => {
+    // Local coordinates: a runs along the outgoing wall, b back along the incoming wall.
+    const local = ([a, b]) => [
+      corner[0] + outgoing[0] * a - incoming[0] * b,
+      corner[1] + outgoing[1] * a - incoming[1] * b,
     ];
-    return { outline, bulges: [...bulges, 0, 0, 0, 0] };
-  });
+    const handedness = Math.sign(outgoing[0] * -incoming[1] - outgoing[1] * -incoming[0]);
+    const path = [];
+    const bulges = [];
+    const appendPoint = (point, incomingBulge = 0) => {
+      if (path.length) bulges[bulges.length - 1] = incomingBulge;
+      path.push(local(point));
+      bulges.push(0);
+    };
+    const appendPivot = (pivot, startAngle, endAngle) => {
+      const segmentCount = Math.max(1, Math.ceil((endAngle - startAngle) / maximumArcStep - 1e-12));
+      const segmentSweep = (endAngle - startAngle) / segmentCount;
+      for (let step = 1; step <= segmentCount; step += 1) {
+        const angle = startAngle + segmentSweep * step;
+        appendPoint([
+          pivot[0] + Math.cos(angle) * dogboneRadius,
+          pivot[1] + Math.sin(angle) * dogboneRadius,
+        ], handedness * Math.tan(segmentSweep / 4));
+      }
+    };
+    if (reach > trim + 1e-9) appendPoint([reach, dogboneRadius]);
+    appendPoint([trim, dogboneRadius]);
+    appendPivot([trim, 0], Math.PI / 2, Math.atan2(centerOffset, centerOffset - trim));
+    appendPivot([0, trim], Math.atan2(centerOffset - trim, centerOffset), 0);
+    if (reach > trim + 1e-9) appendPoint([dogboneRadius, reach]);
+    return [index, { path, bulges }];
+  }));
+
+  // The two corners at the bottom of a slot are cut as one path: the later
+  // corner's relief ends along the slot bottom where the earlier one's begins,
+  // so the cutter crosses between them through space the main cutter cleared
+  // instead of retracting.
+  // Start the pairing just after a corner without relief so a slot that wraps
+  // past the first outline point is still paired.
+  const order = reliefArcs.map(({ index }) => index).sort((first, second) => first - second);
+  const start = Math.max(0, order.findIndex((index) => !cornerPaths.has((index - 1 + points.length) % points.length)));
+  const reliefs = [];
+  const paired = new Set();
+  for (const index of [...order.slice(start), ...order.slice(0, start)]) {
+    if (paired.has(index)) continue;
+    const endIndex = (index + 1) % points.length;
+    if (!cornerPaths.has(endIndex) || paired.has(endIndex) || endIndex === index) {
+      reliefs.push(cornerPaths.get(index));
+      paired.add(index);
+      continue;
+    }
+    const first = cornerPaths.get(endIndex);
+    const second = cornerPaths.get(index);
+    const joined = distance(first.path.at(-1), second.path[0]) <= 1e-9;
+    reliefs.push({
+      path: [...first.path, ...(joined ? second.path.slice(1) : second.path)],
+      bulges: [...(joined ? first.bulges.slice(0, -1) : first.bulges), ...second.bulges],
+    });
+    paired.add(index);
+    paired.add(endIndex);
+  }
+  return reliefs;
 }
 
 function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximumArcStep = Math.PI / 8) {
@@ -623,7 +677,6 @@ function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximum
       current[0] + outgoing[0] * relief.outgoing_trim,
       current[1] + outgoing[1] * relief.outgoing_trim,
     ];
-    const arcStart = outline.length;
     appendPoint(start);
     const startAngle = Math.atan2(start[1] - center[1], start[0] - center[0]);
     const endAngle = Math.atan2(end[1] - center[1], end[0] - center[0]);
@@ -641,8 +694,7 @@ function dogbonePocketOutline(points, reliefIndices, radius, offset = 0, maximum
         center[1] + Math.sin(angle) * radius,
       ], segmentBulge);
     }
-    reliefArcs.push(reliefArc(index, current, incoming, outgoing, incomingLength, outgoingLength,
-      outline.slice(arcStart), bulges.slice(arcStart, -1)));
+    reliefArcs.push({ index, corner: [...current], incoming, outgoing });
   }
 
   const operations = [...reliefs.values()].map(({ incoming_trim, outgoing_trim, ...operation }) => operation);
@@ -729,13 +781,19 @@ function fingeredPanel({
       points: points.map(([px, py]) => [px + x, py + y]),
       bulges: points.map(() => 0),
     });
-    for (const region of dogboneReliefRegions(points, routed.reliefArcs, cutterDiameter / 2, dogboneRadius)) {
+    for (const relief of dogboneReliefPaths(
+      points,
+      routed.reliefArcs,
+      cutterDiameter / 2,
+      dogboneRadius,
+      jointClearance,
+    )) {
       entities.push({
         type: "polyline",
         layer: reliefLayer,
-        closed: true,
-        points: region.outline.map(([px, py]) => [px + x, py + y]),
-        bulges: region.bulges,
+        closed: false,
+        points: relief.path.map(([px, py]) => [px + x, py + y]),
+        bulges: relief.bulges,
       });
     }
   };
@@ -947,13 +1005,13 @@ function panelPart({
     : routedOutline;
   const translatedOutline = cutOutline.outline.map(([px, py]) => [px + x, py + y]);
   const reliefEntities = (points, routed, layer) => (separateDogbones
-    ? dogboneReliefRegions(points, routed.reliefArcs, cutterDiameter / 2, dogboneRadius)
-    : []).map((region) => ({
+    ? dogboneReliefPaths(points, routed.reliefArcs, cutterDiameter / 2, dogboneRadius)
+    : []).map((relief) => ({
     type: "polyline",
     layer,
-    closed: true,
-    points: region.outline.map(([px, py]) => [x + px, y + py]),
-    bulges: region.bulges,
+    closed: false,
+    points: relief.path.map(([px, py]) => [x + px, y + py]),
+    bulges: relief.bulges,
   }));
   const bounds = {
     minX: Math.min(...routedOutline.outline.map(([px]) => px)),
